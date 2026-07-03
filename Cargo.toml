@@ -1,0 +1,12 @@
+[package]
+name = "map-reval"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+noodles-bam = "0.90"
+noodles-bgzf = "0.47"
+noodles-core = "0.20"
+noodles-sam = "0.85"
