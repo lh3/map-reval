@@ -140,14 +140,29 @@ pub fn run(
             i_m.add(q, !one_unmapped && !chain_ok, one_unmapped);
         }
 
-        // ---- J: per-junction exact match ----
-        for ja in &pa.junctions {
-            let matched = same_contig && pb.junctions.contains(ja);
-            j_a.add(qa, pb.mapped && !matched, !pb.mapped);
+        // ---- J: per-junction exact match (linear via sorted-list merge) ----
+        let shared = if same_contig {
+            shared_count(&pa.junctions, &pb.junctions) as u64
+        } else {
+            0
+        };
+        let na = pa.junctions.len() as u64;
+        if na > 0 {
+            // na > 0 implies A is mapped; a junction is `diff` when B is mapped
+            // but lacks an exact match, `unmap` when B is unmapped.
+            if pb.mapped {
+                j_a.add_n(qa, na, na - shared, 0);
+            } else {
+                j_a.add_n(qa, na, 0, na);
+            }
         }
-        for jb in &pb.junctions {
-            let matched = same_contig && pa.junctions.contains(jb);
-            j_b.add(qb, pa.mapped && !matched, !pa.mapped);
+        let nb = pb.junctions.len() as u64;
+        if nb > 0 {
+            if pa.mapped {
+                j_b.add_n(qb, nb, nb - shared, 0);
+            } else {
+                j_b.add_n(qb, nb, 0, nb);
+            }
         }
 
         if emit_e && discordant {
@@ -198,6 +213,12 @@ impl Group {
         if unmap {
             self.unmap[q] += 1;
         }
+    }
+
+    fn add_n(&mut self, q: usize, reads: u64, diff: u64, unmap: u64) {
+        self.reads[q] += reads;
+        self.diff[q] += diff;
+        self.unmap[q] += unmap;
     }
 }
 
@@ -367,6 +388,25 @@ fn reciprocal_overlap(a: &[(usize, usize)], b: &[(usize, usize)]) -> f64 {
     }
 }
 
+/// Number of intervals present in both lists. Both must be sorted, strictly
+/// ascending, and internally disjoint (as `ref_blocks` produces junctions).
+fn shared_count(a: &[(usize, usize)], b: &[(usize, usize)]) -> usize {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let (mut i, mut j, mut n) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            Less => i += 1,
+            Greater => j += 1,
+            Equal => {
+                n += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,6 +511,23 @@ mod tests {
     fn overlap_two_block_identical() {
         let s = [(100, 150), (350, 400)];
         assert_eq!(reciprocal_overlap(&s, &s), 1.0);
+    }
+
+    #[test]
+    fn shared_count_cases() {
+        // disjoint
+        assert_eq!(shared_count(&[(10, 20)], &[(30, 40)]), 0);
+        // fully shared
+        let s = [(10, 20), (30, 40), (50, 60)];
+        assert_eq!(shared_count(&s, &s), 3);
+        // partial with interleaving: shared (10,20) and (50,60); (30,40)/(35,45) differ.
+        let a = [(10, 20), (30, 40), (50, 60)];
+        let b = [(10, 20), (35, 45), (50, 60)];
+        assert_eq!(shared_count(&a, &b), 2);
+        // same start, different end must not match.
+        assert_eq!(shared_count(&[(10, 20)], &[(10, 25)]), 0);
+        // empty lists
+        assert_eq!(shared_count(&[], &[(10, 20)]), 0);
     }
 
     #[test]
