@@ -294,7 +294,10 @@ impl<'a> Placement<'a> {
             start,
             end,
             rev: rec.flags().is_reverse_complemented(),
-            mapq: rec.mapping_quality().map(|m| m.get()).unwrap_or(0),
+            // Raw MAPQ byte. noodles decodes the SAM "missing" sentinel (255) to
+            // None; aligners like STAR use 255 for unique mappings, so recover it
+            // as 255 rather than collapsing to 0 (unmapped reads use 0 above).
+            mapq: rec.mapping_quality().map(|m| m.get()).unwrap_or(255),
             blocks,
             junctions,
         }
