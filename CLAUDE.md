@@ -46,17 +46,19 @@ Tag policy: `flip` transforms `MD`/`MC`/`SA` and treats a fixed allowlist (`KNOW
 
 ### How `cmp` works
 
-`cmp` assumes A and B contain the **same reads in the same order** (both must emit unmapped records). It iterates **primary alignments only** in lock-step (skipping `0x100`/`0x800`), pairing the k-th primary of each; a read-name/segment mismatch or a primary-count mismatch is a **fatal error** (no resync). Concordance is **reciprocal overlap** of the two reference footprints (`[pos, pos+span)`, same-contig required): `|A∩B| / |A∪B| ≥ --min-overlap` (default 0.5). Splicing (`N`) is folded into the span for now (approximate; warns once). Each read is binned by `q = max(mapQ_A, mapQ_B)`.
+`cmp` assumes A and B contain the **same reads in the same order** (both must emit unmapped records). It iterates **primary alignments only** in lock-step (skipping `0x100`/`0x800`), pairing the k-th primary of each; a read-name/segment mismatch or a primary-count mismatch is a **fatal error** (no resync). `Placement::of` parses each alignment into a **set of exon blocks** split at `N` plus the list of **intron junctions** (`ref_blocks`). Same-contig is required for any overlap/match.
 
-Output is TAB-delimited with a one-letter line-type column (documented in full in `map-reval cmp --help`):
-- `Q <mapQ> <a_reads> <a_diff> <a_unmap> <b_reads> <b_diff> <b_unmap> <reads> <diff> <unmapped>` — per-mapQ summary. The A group (binned by A's mapQ) is `a_reads` mapped in A at this mapQ, `a_diff` of those discordant in B, `a_unmap` of those unmapped in B; the B group mirrors it binned by B's mapQ. The trailing `reads`/`diff`/`unmapped` are binned by `max(mapQ_A, mapQ_B)` (`diff` = both-mapped but overlap < threshold; `unmapped` = exactly one end unmapped).
+Output is TAB-delimited with a one-letter line-type column (documented in full in `map-reval cmp --help`). All summary lines share the `Group { reads, diff, unmap }` shape, one column group binned by A's mapQ, one by B's, and (for Q/I) a trailing trio binned by `max(mapQ_A, mapQ_B)`:
+- `Q` — per-read **placement** concordance: reciprocal overlap of the exon-block sets `|A∩B|/|A∪B| ≥ --min-overlap` (default 0.5). `diff` = both-mapped but below threshold; `unmap` = one end unmapped.
+- `I` — per-read **intron-chain** concordance over **spliced reads only** (`a_reads`/`b_reads` require ≥1 junction in A/B; the trio counts reads spliced in either). `diff` = junction chains not identical.
+- `J` — per-**junction** concordance (no trio): `a_reads` = junctions in A at the read's mapQ; `diff` = no exactly-matching junction in a mapped B; `unmap` = B unmapped.
 - `U <#reads>` — pairs unmapped in **both** files.
-- `E <name> <a_ctg a_start a_end a_strand a_mapQ> <b_...>` — one per discordant pair (streamed before the `Q`/`U` block); unmapped ends use `.` for all five fields. Emitted only with `-e`.
+- `E ...` — one per discordant pair (placement sense), streamed before the summary blocks; `.` for unmapped ends. Emitted only with `-e`.
 
-Invariant worth checking after changes: `Σ Q.reads + U == ` total primary pairs, and `#E lines == Σ (Q.diff + Q.unmapped)`.
+Invariants worth checking: `Σ Q.reads(trio) + U == ` total primary pairs; `Σ Q.a_diff == Σ Q.b_diff` (each discordant pair bumps both — but this does **not** hold for I/J, which are legitimately asymmetric when a read is spliced in only one file); `Σ I.a_reads` == reads spliced in A; `Σ J.a_reads` == total `N` junctions in A.
 
 ## Testing / verification
 
-Unit tests live next to the code they cover: `src/flip.rs` (`flip_pos`, `revcomp`, `reverse_cigar_str`, `cigar_ref_span`, `reverse_md`, `transform_sa`) and `src/cmp.rs` (`reciprocal_overlap`).
+Unit tests live next to the code they cover: `src/flip.rs` (`flip_pos`, `revcomp`, `reverse_cigar_str`, `cigar_ref_span`, `reverse_md`, `transform_sa`) and `src/cmp.rs` (`ref_blocks`, `reciprocal_overlap` over block sets). Spliced RNA-seq test BAMs (`HG002.RNA-100k.hs38{f,r}.bam`, minimap2 `splice:sr`) exercise the I/J paths; see [[test-data-bams]].
 
 The strongest end-to-end check for `flip` is the **involution**: `flip` a BAM twice and the result must be byte-identical to the input (`samtools view` diff). For `cmp`, run `flip` on the RC-ref BAM then `cmp` it against the forward-ref BAM and confirm the invariants above; forward-vs-flipped disagreement is expected (highest at low mapQ) — that residual is exactly what the tool measures, not a bug.

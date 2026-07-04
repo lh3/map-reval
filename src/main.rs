@@ -25,12 +25,19 @@ enum Command {
     /// Output is TAB-delimited; the first column is a one-letter line type:
     ///
     ///   Q  <mapQ> <a_reads> <a_diff> <a_unmap> <b_reads> <b_diff> <b_unmap> <reads> <diff> <unmapped>
-    ///        per-mapQ summary. The A group is binned by A's mapQ: a_reads = reads
-    ///        mapped in A at this mapQ, a_diff = of those, mapped in B but with
-    ///        reciprocal overlap < --min-overlap, a_unmap = of those, unmapped in B.
-    ///        The B group (b_reads/b_diff/b_unmap) is the mirror, binned by B's mapQ.
-    ///        The last three are binned by q = max(mapQ_A, mapQ_B): reads at this
-    ///        mapQ, #diff (both-mapped but discordant), #unmapped (one end unmapped).
+    ///        per-read placement summary. The A group is binned by A's mapQ:
+    ///        a_reads = reads mapped in A at this mapQ, a_diff = of those, mapped
+    ///        in B but with reciprocal overlap of the exon-block sets < --min-overlap,
+    ///        a_unmap = of those, unmapped in B. The B group is the mirror, binned by
+    ///        B's mapQ. The last three are binned by q = max(mapQ_A, mapQ_B).
+    ///   I  <mapQ> ... (same 9 columns as Q)
+    ///        per-read intron-chain summary over SPLICED reads only (>=1 N junction);
+    ///        "diff" here means the two junction chains are not identical (same-contig
+    ///        required). The trailing trio counts reads spliced in either A or B.
+    ///   J  <mapQ> <a_reads> <a_diff> <a_unmap> <b_reads> <b_diff> <b_unmap>
+    ///        per-junction summary: a_reads = junctions in A at this (read) mapQ,
+    ///        a_diff = of those, no exactly-matching junction in a mapped B, a_unmap =
+    ///        of those, B unmapped. B group mirrors it. No max-binned trio.
     ///   U  <#reads>
     ///        pairs unmapped in both files.
     ///   E  <name> <a_ctg> <a_start> <a_end> <a_strand> <a_mapQ> <b_ctg> <b_start> <b_end> <b_strand> <b_mapQ>
