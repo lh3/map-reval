@@ -60,5 +60,7 @@ full column spec):
 ## Requirements
 
 Both inputs must list the **same reads in the same order** (name-collated, with
-unmapped reads emitted, e.g. `samtools collate`). `cmp` compares primary
-alignments only.
+unmapped reads emitted, e.g. `samtools collate`). `cmp` scores each read's
+**primary** alignment, but a primary is counted concordant if it matches any
+alignment (primary or supplementary) of that read in the other file;
+secondary alignments are ignored.

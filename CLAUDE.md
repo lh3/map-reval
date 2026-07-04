@@ -46,17 +46,19 @@ Tag policy: `flip` transforms `MD`/`MC`/`SA` and treats a fixed allowlist (`KNOW
 
 ### How `cmp` works
 
-`cmp` assumes A and B contain the **same reads in the same order** (both must emit unmapped records). It iterates **primary alignments only** in lock-step (skipping `0x100`/`0x800`), pairing the k-th primary of each; a read-name/segment mismatch or a primary-count mismatch is a **fatal error** (no resync). `Placement::of` parses each alignment into a **set of exon blocks** split at `N` plus the list of **intron junctions** (`ref_blocks`). Same-contig is required for any overlap/match.
+`cmp` assumes A and B contain the **same reads in the same order** (both must emit unmapped records). It reads one **query-name group** at a time from each file (`next_group`, relying on `GO:query`); a group name mismatch, group-count mismatch, or per-segment presence mismatch is a **fatal error** (no resync). Within a group it buckets records by segment (read1/read2/unpaired), separating each segment's **primary** from its **supplementary** alignments and **ignoring secondaries** (`0x100`). `Placement::of` parses each alignment into a **set of exon blocks** split at `N` plus its **intron junctions** (`ref_blocks`). Same-contig is required for any overlap/match.
+
+**Concordance is supplementary-aware for Q and I.** A read's **primary** interval in A is concordant if it reaches the threshold with *any* alignment (primary or supplementary) of that read in B — and symmetrically (`Counters::compare`). So `a_diff` (A primary vs B's alignment set) and `b_diff` (B primary vs A's set) are independent/directional; a pair is discordant (trio `diff`, E emission) when **either** direction is unmatched. The **J** line stays primary-vs-primary. mapQ binning always uses the primary's mapQ.
 
 Output is TAB-delimited with a one-letter line-type column (documented in full in `map-reval cmp --help`). All summary lines share the `Group { reads, diff, unmap }` shape, one column group binned by A's mapQ, one by B's, and (for Q/I) a trailing trio binned by `max(mapQ_A, mapQ_B)`:
-- `Q` — per-read **placement** concordance: reciprocal overlap of the exon-block sets `|A∩B|/|A∪B| ≥ --min-overlap` (default 0.5). `diff` = both-mapped but below threshold; `unmap` = one end unmapped.
-- `I` — per-read **intron-chain** concordance over **spliced reads only** (`a_reads`/`b_reads` require ≥1 junction in A/B; the trio counts reads spliced in either). `diff` = junction chains not identical.
+- `Q` — per-read **placement** concordance: `a_diff` = A primary reaches reciprocal overlap `≥ --min-overlap` (default 0.5) with **no** B alignment (primary or supplementary); `unmap` = one end unmapped.
+- `I` — per-read **intron-chain** concordance over **spliced reads only** (`a_reads`/`b_reads` require ≥1 junction in the primary; the trio counts reads spliced in either). `a_diff` = A primary's junction chain equals **no** B alignment's chain.
 - `J` — per-**junction** concordance (no trio), 8 data cols in order `a_at a_shifted a_gone a_unmap` (+ B mirror): `a_shifted` = no exact match but overlapping a B junction; `a_gone` = B mapped with no overlapping junction; `a_unmap` = B unmapped (exact matches = `a_at − a_shifted − a_gone − a_unmap`).
 - `U <#reads>` — pairs unmapped in **both** files.
 - `E ...` — one per discordant pair (placement sense), streamed before the summary blocks; read name carries a `/1`/`/2` segment suffix; read extent as a **0-based half-open (BED)** interval, `.` for unmapped ends. Emitted only with `-e`.
 - `F ...` — same 12 columns as `E` but per **junction**: one line per non-exact junction on both sides; the focus junction fills its own side (BED interval), the other side shows the largest-overlapping junction (shifted) or `.`×5 (gone / other read unmapped). Emitted only with `-e`. Identical F lines are deduplicated, so a shifted junction (whose A- and B-focused lines coincide) is shown once.
 
-Invariants worth checking: `Σ Q.reads(trio) + U == ` total primary pairs; `Σ Q.a_diff == Σ Q.b_diff` (each discordant pair bumps both — but this does **not** hold for I/J, which are legitimately asymmetric when a read is spliced in only one file); `Σ I.a_reads` == reads spliced in A; `Σ J.a_reads` == total `N` junctions in A.
+Invariants worth checking: `Σ Q.reads(trio) + U == ` total primary pairs; `Σ I.a_reads` == reads spliced in A; `Σ J.a_reads` == total `N` junctions in A. (`Q.a_diff` and `Q.b_diff` are now directional and need not be equal, since a supplementary can rescue one side but not the other.)
 
 ## Testing / verification
 

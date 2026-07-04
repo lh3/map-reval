@@ -26,10 +26,11 @@ enum Command {
     ///
     ///   Q  <mapQ> <a_reads> <a_diff> <a_unmap> <b_reads> <b_diff> <b_unmap> <reads> <diff> <unmapped>
     ///        per-read placement summary. The A group is binned by A's mapQ:
-    ///        a_reads = reads mapped in A at this mapQ, a_diff = of those, mapped
-    ///        in B but with reciprocal overlap of the exon-block sets < --min-overlap,
-    ///        a_unmap = of those, unmapped in B. The B group is the mirror, binned by
-    ///        B's mapQ. The last three are binned by q = max(mapQ_A, mapQ_B).
+    ///        a_reads = reads mapped in A at this mapQ, a_diff = of those, whose
+    ///        A primary reaches reciprocal overlap >= --min-overlap with NO alignment
+    ///        (primary or supplementary) of that read in B, a_unmap = of those,
+    ///        unmapped in B. The B group is the mirror, binned by B's mapQ. The last
+    ///        three are binned by q = max(mapQ_A, mapQ_B). (Secondary alns ignored.)
     ///   I  <mapQ> ... (same 9 columns as Q)
     ///        per-read intron-chain summary over SPLICED reads only (>=1 N junction);
     ///        "diff" here means the two junction chains are not identical (same-contig

@@ -41,171 +41,89 @@ pub fn run(
         None => Box::new(BufWriter::new(io::stdout().lock())),
     };
 
-    // Q: read-level concordance by reciprocal block-set overlap.
-    //   *_a binned by mapQ_A, *_b by mapQ_B, *_m by max(mapQ_A, mapQ_B).
-    let mut q_a = Group::new();
-    let mut q_b = Group::new();
-    let mut q_m = Group::new();
-    // I: read-level intron-chain concordance (spliced reads only).
-    let mut i_a = Group::new();
-    let mut i_b = Group::new();
-    let mut i_m = Group::new();
-    // J: per-junction concordance.
-    let mut j_a = JGroup::new();
-    let mut j_b = JGroup::new();
-
-    let mut skipped_a = 0u64;
-    let mut skipped_b = 0u64;
-    let mut spliced_a = 0u64;
-    let mut spliced_b = 0u64;
-    let mut both_unmapped = 0u64;
+    let mut cx = Counters::new();
+    let mut secondary_a = 0u64;
+    let mut secondary_b = 0u64;
+    let mut supp_a = 0u64;
+    let mut supp_b = 0u64;
 
     let mut it_a = ra.record_bufs(&ha);
     let mut it_b = rb.record_bufs(&hb);
+    let mut pending_a: Option<RecordBuf> = None;
+    let mut pending_b: Option<RecordBuf> = None;
     let mut idx = 0u64;
 
     loop {
-        let ca = next_primary(&mut it_a, &mut skipped_a).context("reading A")?;
-        let cb = next_primary(&mut it_b, &mut skipped_b).context("reading B")?;
+        let ga = next_group(&mut it_a, &mut pending_a).context("reading A")?;
+        let gb = next_group(&mut it_b, &mut pending_b).context("reading B")?;
 
-        let (rec_a, rec_b) = match (ca, cb) {
+        let (group_a, group_b) = match (ga, gb) {
             (None, None) => break,
             (Some(_), None) | (None, Some(_)) => bail!(
-                "primary count mismatch (A and B disagree after {idx} pairs); \
+                "read-group count mismatch (A and B disagree after {idx} pairs); \
                  inputs must contain the same reads in the same order"
             ),
             (Some(a), Some(b)) => (a, b),
         };
 
-        // Guard: the two streams must be the same read set in the same order.
-        if rec_a.name() != rec_b.name()
-            || rec_a.flags().is_first_segment() != rec_b.flags().is_first_segment()
-            || rec_a.flags().is_last_segment() != rec_b.flags().is_last_segment()
-        {
+        if group_name(&group_a) != group_name(&group_b) {
             bail!(
                 "record mismatch at pair {idx}: A={:?} B={:?}; \
                  inputs must contain the same reads in the same order",
-                String::from_utf8_lossy(rec_a.name().unwrap_or_default()),
-                String::from_utf8_lossy(rec_b.name().unwrap_or_default()),
+                String::from_utf8_lossy(group_name(&group_a).unwrap_or_default()),
+                String::from_utf8_lossy(group_name(&group_b).unwrap_or_default()),
             );
         }
 
-        let pa = Placement::of(&rec_a, &names_a);
-        let pb = Placement::of(&rec_b, &names_b);
+        let segs_a = split_group(&group_a, &names_a, &mut secondary_a, &mut supp_a);
+        let segs_b = split_group(&group_b, &names_b, &mut secondary_b, &mut supp_b);
 
-        let qa = pa.mapq as usize;
-        let qb = pb.mapq as usize;
-        let q = qa.max(qb);
+        for key in 0..segs_a.len() {
+            match (&segs_a[key], &segs_b[key]) {
+                (None, None) => continue,
+                (Some(_), None) | (None, Some(_)) => bail!(
+                    "segment mismatch at pair {idx}: read present in only one file; \
+                     inputs must contain the same reads in the same order"
+                ),
+                (Some(sa), Some(sb)) => {
+                    let discordant = cx.compare(sa, sb, min_overlap);
 
-        let same_contig = pa.mapped && pb.mapped && pa.contig == pb.contig;
-
-        // ---- Q: reciprocal block-set overlap ----
-        let discordant = if pa.mapped && pb.mapped {
-            let ratio = if same_contig {
-                reciprocal_overlap(&pa.blocks, &pb.blocks)
-            } else {
-                0.0
-            };
-            let wrong = ratio < min_overlap;
-            q_m.add(q, wrong, false);
-            q_a.add(qa, wrong, false);
-            q_b.add(qb, wrong, false);
-            wrong
-        } else if pa.mapped {
-            q_m.add(q, false, true);
-            q_a.add(qa, false, true);
-            true
-        } else if pb.mapped {
-            q_m.add(q, false, true);
-            q_b.add(qb, false, true);
-            true
-        } else {
-            both_unmapped += 1;
-            false
-        };
-
-        // ---- I: intron-chain equality (spliced reads only) ----
-        let a_spliced = !pa.junctions.is_empty();
-        let b_spliced = !pb.junctions.is_empty();
-        spliced_a += u64::from(a_spliced);
-        spliced_b += u64::from(b_spliced);
-        if a_spliced || b_spliced {
-            let chain_ok = same_contig && pa.junctions == pb.junctions;
-            if a_spliced {
-                i_a.add(qa, pb.mapped && !chain_ok, !pb.mapped);
-            }
-            if b_spliced {
-                i_b.add(qb, pa.mapped && !chain_ok, !pa.mapped);
-            }
-            let one_unmapped = !pa.mapped || !pb.mapped;
-            i_m.add(q, !one_unmapped && !chain_ok, one_unmapped);
-        }
-
-        // ---- J: per-junction match, split into shifted (overlaps) vs gone ----
-        // `shared` = exact-coordinate matches (symmetric); `overlap_count` per
-        // side counts junctions overlapping any junction in the other alignment.
-        let shared = if same_contig {
-            shared_count(&pa.junctions, &pb.junctions) as u64
-        } else {
-            0
-        };
-        let na = pa.junctions.len() as u64;
-        if na > 0 {
-            // na > 0 implies A is mapped.
-            if !pb.mapped {
-                j_a.add_n(qa, na, 0, 0, na);
-            } else if !same_contig {
-                j_a.add_n(qa, na, na, 0, 0); // mapped elsewhere: none overlap
-            } else {
-                let ov = overlap_count(&pa.junctions, &pb.junctions) as u64;
-                j_a.add_n(qa, na, na - ov, ov - shared, 0);
+                    if emit_e {
+                        let q = sa.primary.mapq.max(sb.primary.mapq);
+                        if q >= min_mapq {
+                            let name = format!("{}{}", group_name_str(&group_a), seg_suffix(key));
+                            if discordant {
+                                writeln!(
+                                    out,
+                                    "E\t{name}\t{}\t{}",
+                                    sa.primary.fields(),
+                                    sb.primary.fields()
+                                )
+                                .context("failed to write E line")?;
+                            }
+                            let same_contig = sa.primary.mapped
+                                && sb.primary.mapped
+                                && sa.primary.contig == sb.primary.contig;
+                            write_f_lines(&mut out, &name, &sa.primary, &sb.primary, same_contig)?;
+                        }
+                    }
+                    idx += 1;
+                }
             }
         }
-        let nb = pb.junctions.len() as u64;
-        if nb > 0 {
-            if !pa.mapped {
-                j_b.add_n(qb, nb, 0, 0, nb);
-            } else if !same_contig {
-                j_b.add_n(qb, nb, nb, 0, 0);
-            } else {
-                let ov = overlap_count(&pb.junctions, &pa.junctions) as u64;
-                j_b.add_n(qb, nb, nb - ov, ov - shared, 0);
-            }
-        }
-
-        if emit_e && q >= min_mapq as usize {
-            // Append /1 or /2 so the two segments of a pair are distinguishable.
-            let suffix = if rec_a.flags().is_first_segment() {
-                "/1"
-            } else if rec_a.flags().is_last_segment() {
-                "/2"
-            } else {
-                ""
-            };
-            let name = format!(
-                "{}{suffix}",
-                String::from_utf8_lossy(rec_a.name().unwrap_or_default())
-            );
-            if discordant {
-                writeln!(out, "E\t{name}\t{}\t{}", pa.fields(), pb.fields())
-                    .context("failed to write E line")?;
-            }
-            write_f_lines(&mut out, &name, &pa, &pb, same_contig)?;
-        }
-
-        idx += 1;
     }
 
-    write_grouped(&mut out, "Q", &q_a, &q_b, Some(&q_m))?;
-    write_grouped(&mut out, "I", &i_a, &i_b, Some(&i_m))?;
-    write_j(&mut out, &j_a, &j_b)?;
-    writeln!(out, "U\t{both_unmapped}").context("failed to write U line")?;
+    write_grouped(&mut out, "Q", &cx.q_a, &cx.q_b, Some(&cx.q_m))?;
+    write_grouped(&mut out, "I", &cx.i_a, &cx.i_b, Some(&cx.i_m))?;
+    write_j(&mut out, &cx.j_a, &cx.j_b)?;
+    writeln!(out, "U\t{}", cx.both_unmapped).context("failed to write U line")?;
 
     out.flush().context("failed to flush output")?;
 
     eprintln!(
-        "map-reval cmp: compared {idx} primary pairs (spliced A={spliced_a} B={spliced_b}); \
-         skipped non-primary A={skipped_a} B={skipped_b}"
+        "map-reval cmp: compared {idx} primary pairs (spliced A={} B={}); \
+         supplementary A={supp_a} B={supp_b}; secondary A={secondary_a} B={secondary_b}",
+        cx.spliced_a, cx.spliced_b
     );
 
     Ok(())
@@ -364,7 +282,8 @@ fn write_j(out: &mut dyn Write, a: &JGroup, b: &JGroup) -> Result<()> {
 /// A list of half-open reference intervals (exon blocks or intron junctions).
 type Intervals = Vec<(usize, usize)>;
 
-/// Reference placement of a primary alignment: exon blocks and intron junctions.
+/// Reference placement of one alignment: exon blocks and intron junctions.
+#[derive(Clone)]
 struct Placement<'a> {
     mapped: bool,
     contig: Option<&'a str>,
@@ -471,20 +390,234 @@ fn contig_names(header: &sam::Header) -> Vec<String> {
         .collect()
 }
 
-fn next_primary<I>(it: &mut I, skipped: &mut u64) -> Result<Option<RecordBuf>>
+/// All per-mapQ tallies accumulated over the run.
+struct Counters {
+    q_a: Group,
+    q_b: Group,
+    q_m: Group,
+    i_a: Group,
+    i_b: Group,
+    i_m: Group,
+    j_a: JGroup,
+    j_b: JGroup,
+    spliced_a: u64,
+    spliced_b: u64,
+    both_unmapped: u64,
+}
+
+impl Counters {
+    fn new() -> Self {
+        Self {
+            q_a: Group::new(),
+            q_b: Group::new(),
+            q_m: Group::new(),
+            i_a: Group::new(),
+            i_b: Group::new(),
+            i_m: Group::new(),
+            j_a: JGroup::new(),
+            j_b: JGroup::new(),
+            spliced_a: 0,
+            spliced_b: 0,
+            both_unmapped: 0,
+        }
+    }
+
+    /// Compare one read (a single segment) and update all tallies; returns whether
+    /// the pair is placement-discordant (drives E emission). `sa`/`sb` carry the
+    /// primary placement plus every mapped alignment (primary + supplementary).
+    fn compare(&mut self, sa: &Seg, sb: &Seg, min_overlap: f64) -> bool {
+        let pa = &sa.primary;
+        let pb = &sb.primary;
+        let qa = pa.mapq as usize;
+        let qb = pb.mapq as usize;
+        let q = qa.max(qb);
+        let same_contig = pa.mapped && pb.mapped && pa.contig == pb.contig;
+
+        // ---- Q: primary concordant if it overlaps ANY alignment on the other side ----
+        let discordant = if pa.mapped && pb.mapped {
+            let a_conc = sb.alns.iter().any(|o| {
+                pa.contig == o.contig && reciprocal_overlap(&pa.blocks, &o.blocks) >= min_overlap
+            });
+            let b_conc = sa.alns.iter().any(|o| {
+                pb.contig == o.contig && reciprocal_overlap(&pb.blocks, &o.blocks) >= min_overlap
+            });
+            self.q_a.add(qa, !a_conc, false);
+            self.q_b.add(qb, !b_conc, false);
+            self.q_m.add(q, !a_conc || !b_conc, false);
+            !a_conc || !b_conc
+        } else if pa.mapped {
+            self.q_m.add(q, false, true);
+            self.q_a.add(qa, false, true);
+            true
+        } else if pb.mapped {
+            self.q_m.add(q, false, true);
+            self.q_b.add(qb, false, true);
+            true
+        } else {
+            self.both_unmapped += 1;
+            false
+        };
+
+        // ---- I: primary chain concordant if it matches ANY alignment's chain ----
+        let a_spliced = !pa.junctions.is_empty();
+        let b_spliced = !pb.junctions.is_empty();
+        self.spliced_a += u64::from(a_spliced);
+        self.spliced_b += u64::from(b_spliced);
+        if a_spliced || b_spliced {
+            let a_chain_conc = sb
+                .alns
+                .iter()
+                .any(|o| o.contig == pa.contig && o.junctions == pa.junctions);
+            let b_chain_conc = sa
+                .alns
+                .iter()
+                .any(|o| o.contig == pb.contig && o.junctions == pb.junctions);
+            if a_spliced {
+                self.i_a.add(qa, pb.mapped && !a_chain_conc, !pb.mapped);
+            }
+            if b_spliced {
+                self.i_b.add(qb, pa.mapped && !b_chain_conc, !pa.mapped);
+            }
+            let one_unmapped = !pa.mapped || !pb.mapped;
+            let m_diff = !one_unmapped
+                && ((a_spliced && !a_chain_conc) || (b_spliced && !b_chain_conc));
+            self.i_m.add(q, m_diff, one_unmapped);
+        }
+
+        // ---- J: per-junction match (primary-vs-primary, unchanged) ----
+        let shared = if same_contig {
+            shared_count(&pa.junctions, &pb.junctions) as u64
+        } else {
+            0
+        };
+        let na = pa.junctions.len() as u64;
+        if na > 0 {
+            if !pb.mapped {
+                self.j_a.add_n(qa, na, 0, 0, na);
+            } else if !same_contig {
+                self.j_a.add_n(qa, na, na, 0, 0);
+            } else {
+                let ov = overlap_count(&pa.junctions, &pb.junctions) as u64;
+                self.j_a.add_n(qa, na, na - ov, ov - shared, 0);
+            }
+        }
+        let nb = pb.junctions.len() as u64;
+        if nb > 0 {
+            if !pa.mapped {
+                self.j_b.add_n(qb, nb, 0, 0, nb);
+            } else if !same_contig {
+                self.j_b.add_n(qb, nb, nb, 0, 0);
+            } else {
+                let ov = overlap_count(&pb.junctions, &pa.junctions) as u64;
+                self.j_b.add_n(qb, nb, nb - ov, ov - shared, 0);
+            }
+        }
+
+        discordant
+    }
+}
+
+/// One read segment: its primary placement plus every mapped alignment
+/// (primary if mapped + supplementaries) for supplementary-aware concordance.
+struct Seg<'a> {
+    primary: Placement<'a>,
+    alns: Vec<Placement<'a>>,
+}
+
+/// Read all consecutive records sharing a query name (contiguous under
+/// `GO:query`), carrying the first record of the next group in `pending`.
+fn next_group<I>(it: &mut I, pending: &mut Option<RecordBuf>) -> Result<Option<Vec<RecordBuf>>>
 where
     I: Iterator<Item = io::Result<RecordBuf>>,
 {
+    let first = match pending.take() {
+        Some(r) => r,
+        None => match it.next() {
+            Some(r) => r?,
+            None => return Ok(None),
+        },
+    };
+    let name: Option<Vec<u8>> = rec_name(&first).map(<[u8]>::to_vec);
+    let mut group = vec![first];
     for r in it.by_ref() {
         let rec = r?;
+        if rec_name(&rec) == name.as_deref() {
+            group.push(rec);
+        } else {
+            *pending = Some(rec);
+            break;
+        }
+    }
+    Ok(Some(group))
+}
+
+fn rec_name(rec: &RecordBuf) -> Option<&[u8]> {
+    rec.name().map(AsRef::as_ref)
+}
+
+fn group_name(group: &[RecordBuf]) -> Option<&[u8]> {
+    group.first().and_then(rec_name)
+}
+
+fn group_name_str(group: &[RecordBuf]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(group_name(group).unwrap_or_default())
+}
+
+/// Segment key: 1 = first (0x40), 2 = last (0x80), 0 = unpaired.
+fn seg_key(flags: sam::alignment::record::Flags) -> usize {
+    if flags.is_first_segment() {
+        1
+    } else if flags.is_last_segment() {
+        2
+    } else {
+        0
+    }
+}
+
+fn seg_suffix(key: usize) -> &'static str {
+    match key {
+        1 => "/1",
+        2 => "/2",
+        _ => "",
+    }
+}
+
+/// Split a name group into per-segment primary + mapped-alignment sets, skipping
+/// secondary alignments (counted). `supp` accumulates supplementary counts.
+fn split_group<'a>(
+    group: &[RecordBuf],
+    names: &'a [String],
+    secondary: &mut u64,
+    supp: &mut u64,
+) -> [Option<Seg<'a>>; 3] {
+    let mut segs: [Option<Seg>; 3] = [None, None, None];
+    // Pass 1: primaries (records may be in any order within the name group).
+    for rec in group {
         let f = rec.flags();
-        if f.is_secondary() || f.is_supplementary() {
-            *skipped += 1;
+        if f.is_secondary() {
+            *secondary += 1;
+        } else if !f.is_supplementary() {
+            let p = Placement::of(rec, names);
+            let alns = if p.mapped { vec![p.clone()] } else { Vec::new() };
+            segs[seg_key(f)] = Some(Seg { primary: p, alns });
+        }
+    }
+    // Pass 2: attach mapped supplementaries to their segment's alignment set.
+    for rec in group {
+        let f = rec.flags();
+        if f.is_secondary() || !f.is_supplementary() {
             continue;
         }
-        return Ok(Some(rec));
+        *supp += 1;
+        let p = Placement::of(rec, names);
+        if !p.mapped {
+            continue;
+        }
+        if let Some(seg) = segs[seg_key(f)].as_mut() {
+            seg.alns.push(p);
+        }
     }
-    Ok(None)
+    segs
 }
 
 /// Reciprocal overlap (intersection / union) of two exon-block sets on the same
