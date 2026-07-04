@@ -20,6 +20,7 @@ pub fn run(
     min_overlap: f64,
     output: Option<&Path>,
     emit_e: bool,
+    min_mapq: u8,
 ) -> Result<()> {
     let mut ra = bam::io::Reader::new(
         File::open(a).with_context(|| format!("failed to open {}", a.display()))?,
@@ -172,10 +173,24 @@ pub fn run(
             }
         }
 
-        if emit_e && discordant {
-            let name = String::from_utf8_lossy(rec_a.name().unwrap_or_default());
-            writeln!(out, "E\t{name}\t{}\t{}", pa.fields(), pb.fields())
-                .context("failed to write E line")?;
+        if emit_e && q >= min_mapq as usize {
+            // Append /1 or /2 so the two segments of a pair are distinguishable.
+            let suffix = if rec_a.flags().is_first_segment() {
+                "/1"
+            } else if rec_a.flags().is_last_segment() {
+                "/2"
+            } else {
+                ""
+            };
+            let name = format!(
+                "{}{suffix}",
+                String::from_utf8_lossy(rec_a.name().unwrap_or_default())
+            );
+            if discordant {
+                writeln!(out, "E\t{name}\t{}\t{}", pa.fields(), pb.fields())
+                    .context("failed to write E line")?;
+            }
+            write_f_lines(&mut out, &name, &pa, &pb, same_contig)?;
         }
 
         idx += 1;
@@ -280,6 +295,55 @@ fn write_grouped(
     Ok(())
 }
 
+/// Emit an F line per non-exact junction on both sides (only under `-e`).
+/// The focus junction fills its own side; the other side shows the largest-
+/// overlap partner (shifted) or `.` (gone/unmapped).
+fn write_f_lines(
+    out: &mut dyn Write,
+    name: &str,
+    pa: &Placement,
+    pb: &Placement,
+    same_contig: bool,
+) -> Result<()> {
+    let mut lines: Vec<String> = Vec::new();
+    for &j in &pa.junctions {
+        let class = if pb.mapped && same_contig {
+            classify(j, &pb.junctions)
+        } else {
+            JClass::Gone
+        };
+        match class {
+            JClass::Exact => {}
+            JClass::Shifted(o) => {
+                lines.push(format!("F\t{name}\t{}\t{}", pa.junc_fields(j), pb.junc_fields(o)))
+            }
+            JClass::Gone => lines.push(format!("F\t{name}\t{}\t{DOT5}", pa.junc_fields(j))),
+        }
+    }
+    for &j in &pb.junctions {
+        let class = if pa.mapped && same_contig {
+            classify(j, &pa.junctions)
+        } else {
+            JClass::Gone
+        };
+        match class {
+            JClass::Exact => {}
+            JClass::Shifted(o) => {
+                lines.push(format!("F\t{name}\t{}\t{}", pa.junc_fields(o), pb.junc_fields(j)))
+            }
+            JClass::Gone => lines.push(format!("F\t{name}\t{DOT5}\t{}", pb.junc_fields(j))),
+        }
+    }
+    // A symmetric shifted pair yields two identical lines; emit each unique line once.
+    let mut seen = std::collections::HashSet::new();
+    for line in &lines {
+        if seen.insert(line.as_str()) {
+            writeln!(out, "{line}").context("failed to write F line")?;
+        }
+    }
+    Ok(())
+}
+
 /// Print the J (per-junction) lines: 8 data columns, no max-binned trio.
 fn write_j(out: &mut dyn Write, a: &JGroup, b: &JGroup) -> Result<()> {
     for q in (0..256).rev() {
@@ -349,17 +413,30 @@ impl<'a> Placement<'a> {
         }
     }
 
-    /// The five TAB-separated E-line fields for this side (`.` when unmapped).
+    /// The five TAB-separated E-line fields for this side (`.` when unmapped):
+    /// the outer extent as a 0-based half-open (BED) interval.
     fn fields(&self) -> String {
         if !self.mapped {
-            return ".\t.\t.\t.\t.".to_string();
+            return DOT5.to_string();
         }
-        let ctg = self.contig.unwrap_or(".");
-        let strand = if self.rev { '-' } else { '+' };
-        // Display 1-based inclusive end of the outer extent.
-        format!("{ctg}\t{}\t{}\t{strand}\t{}", self.start, self.end - 1, self.mapq)
+        bed_fields(self.contig.unwrap_or("."), self.start, self.end, self.rev, self.mapq)
+    }
+
+    /// F-line fields for one junction of this read (BED coordinates).
+    fn junc_fields(&self, j: (usize, usize)) -> String {
+        bed_fields(self.contig.unwrap_or("."), j.0, j.1, self.rev, self.mapq)
     }
 }
+
+/// Five TAB-separated fields for one alignment side: a 0-based half-open (BED)
+/// interval plus its read's contig/strand/mapQ. `lo`/`hi` are 1-based `[lo, hi)`.
+fn bed_fields(ctg: &str, lo: usize, hi: usize, rev: bool, mapq: u8) -> String {
+    let strand = if rev { '-' } else { '+' };
+    format!("{ctg}\t{}\t{}\t{strand}\t{}", lo - 1, hi - 1, mapq)
+}
+
+/// The unmapped placeholder for a five-field alignment side.
+const DOT5: &str = ".\t.\t.\t.\t.";
 
 /// Split a CIGAR into exon blocks and intron junctions given a 1-based start.
 /// `N` (Skip) ends the current exon and opens an intron; other reference-
@@ -454,6 +531,33 @@ fn shared_count(a: &[(usize, usize)], b: &[(usize, usize)]) -> usize {
         }
     }
     n
+}
+
+/// Classification of one junction against another alignment's junction set.
+enum JClass {
+    Exact,
+    Shifted((usize, usize)),
+    Gone,
+}
+
+/// Classify junction `j` against `others` (sorted, strictly ascending, disjoint):
+/// exact-coordinate match, else the largest-overlap partner (shifted), else gone.
+fn classify(j: (usize, usize), others: &[(usize, usize)]) -> JClass {
+    let mut k = others.partition_point(|&(_, e)| e <= j.0); // first that can overlap
+    let (mut best, mut best_ov) = (None, 0usize);
+    while k < others.len() && others[k].0 < j.1 {
+        let o = others[k];
+        if o == j {
+            return JClass::Exact;
+        }
+        let ov = j.1.min(o.1) - j.0.max(o.0);
+        if ov > best_ov {
+            best_ov = ov;
+            best = Some(o);
+        }
+        k += 1;
+    }
+    best.map_or(JClass::Gone, JClass::Shifted)
 }
 
 /// Count intervals in `a` that intersect at least one interval in `b` (both
@@ -594,6 +698,22 @@ mod tests {
         assert_eq!(shared_count(&[(10, 20)], &[(10, 25)]), 0);
         // empty lists
         assert_eq!(shared_count(&[], &[(10, 20)]), 0);
+    }
+
+    #[test]
+    fn classify_cases() {
+        use JClass::*;
+        assert!(matches!(classify((100, 200), &[(100, 200)]), Exact));
+        assert!(matches!(classify((100, 200), &[(150, 250)]), Shifted((150, 250))));
+        // multi-overlap picks the largest overlap: (150,250)∩=50 > (90,120)∩=20.
+        assert!(matches!(
+            classify((100, 200), &[(90, 120), (150, 250)]),
+            Shifted((150, 250))
+        ));
+        assert!(matches!(classify((100, 200), &[(300, 400)]), Gone));
+        assert!(matches!(classify((100, 200), &[]), Gone));
+        // exact wins even when another junction also overlaps.
+        assert!(matches!(classify((100, 200), &[(100, 200), (150, 250)]), Exact));
     }
 
     #[test]

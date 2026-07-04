@@ -21,7 +21,7 @@ cargo fmt
 ## Subcommands
 
 - `map-reval flip [-o OUT] [INPUT]` — reads an alignment made against the RC reference and flips every record back onto the original strand, emitting BAM. `INPUT`/`OUT` default to stdin/stdout (`-` is also accepted).
-- `map-reval cmp [-l MIN_OVERLAP] [-o OUT] [-e] <A> <B>` — compares two BAMs of the same reads (typically a forward-ref BAM vs a `flip`ped RC-ref BAM) and reports per-mapQ concordance. `-l` sets the reciprocal-overlap threshold (default 0.5); `-e` additionally emits per-read `E` lines (off by default).
+- `map-reval cmp [-l MIN_OVERLAP] [-o OUT] [-e] [-q MIN_MAPQ] <A> <B>` — compares two BAMs of the same reads (typically a forward-ref BAM vs a `flip`ped RC-ref BAM) and reports per-mapQ concordance. `-l` sets the reciprocal-overlap threshold (default 0.5); `-e` additionally emits per-read `E`/`F` lines (off by default); `-q` (default 5) suppresses those E/F lines when `max(a_mapQ, b_mapQ) < q` (a display filter — the Q/I/J/U aggregates ignore it).
 
 ## Architecture
 
@@ -53,7 +53,8 @@ Output is TAB-delimited with a one-letter line-type column (documented in full i
 - `I` — per-read **intron-chain** concordance over **spliced reads only** (`a_reads`/`b_reads` require ≥1 junction in A/B; the trio counts reads spliced in either). `diff` = junction chains not identical.
 - `J` — per-**junction** concordance (no trio), 8 data cols in order `a_at a_shifted a_gone a_unmap` (+ B mirror): `a_shifted` = no exact match but overlapping a B junction; `a_gone` = B mapped with no overlapping junction; `a_unmap` = B unmapped (exact matches = `a_at − a_shifted − a_gone − a_unmap`).
 - `U <#reads>` — pairs unmapped in **both** files.
-- `E ...` — one per discordant pair (placement sense), streamed before the summary blocks; `.` for unmapped ends. Emitted only with `-e`.
+- `E ...` — one per discordant pair (placement sense), streamed before the summary blocks; read name carries a `/1`/`/2` segment suffix; read extent as a **0-based half-open (BED)** interval, `.` for unmapped ends. Emitted only with `-e`.
+- `F ...` — same 12 columns as `E` but per **junction**: one line per non-exact junction on both sides; the focus junction fills its own side (BED interval), the other side shows the largest-overlapping junction (shifted) or `.`×5 (gone / other read unmapped). Emitted only with `-e`. Identical F lines are deduplicated, so a shifted junction (whose A- and B-focused lines coincide) is shown once.
 
 Invariants worth checking: `Σ Q.reads(trio) + U == ` total primary pairs; `Σ Q.a_diff == Σ Q.b_diff` (each discordant pair bumps both — but this does **not** hold for I/J, which are legitimately asymmetric when a read is spliced in only one file); `Σ I.a_reads` == reads spliced in A; `Σ J.a_reads` == total `N` junctions in A.
 

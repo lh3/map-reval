@@ -42,8 +42,15 @@ enum Command {
     ///   U  <#reads>
     ///        pairs unmapped in both files.
     ///   E  <name> <a_ctg> <a_start> <a_end> <a_strand> <a_mapQ> <b_ctg> <b_start> <b_end> <b_strand> <b_mapQ>
-    ///        one per discordant pair (only with -e); coordinates are 1-based
-    ///        inclusive, strand is +/-, an unmapped end has "." in all five fields.
+    ///        one per discordant pair (only with -e); name carries a /1 or /2
+    ///        segment suffix; intervals are 0-based half-open (BED), strand is
+    ///        +/-, an unmapped end has "." in all five.
+    ///   F  <name> <a...> <b...>   (same 12 columns as E; only with -e)
+    ///        one per non-exact junction (both sides). The focus junction fills its
+    ///        own side (BED interval); the other side shows the largest-overlapping
+    ///        junction if shifted, else "." x5 (gone or the other read unmapped).
+    ///        A shifted junction is emitted once (identical A/B-focused lines dedup).
+    ///        E and F lines are suppressed when max(a_mapQ, b_mapQ) < -q (default 5).
     #[command(verbatim_doc_comment)]
     Cmp(CmpArgs),
 }
@@ -70,6 +77,9 @@ struct CmpArgs {
     /// Emit per-read E lines for discordant reads (off by default).
     #[arg(short = 'e', long = "emit-e")]
     emit_e: bool,
+    /// Minimum max(mapQ) for a discordant E/F line to be emitted (with -e).
+    #[arg(short = 'q', long = "min-mapq", default_value_t = 5)]
+    min_mapq: u8,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -82,6 +92,7 @@ fn main() -> anyhow::Result<()> {
             args.min_overlap,
             args.output.as_deref(),
             args.emit_e,
+            args.min_mapq,
         ),
     }
 }
