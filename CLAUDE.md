@@ -51,7 +51,7 @@ Tag policy: `flip` transforms `MD`/`MC`/`SA` and treats a fixed allowlist (`KNOW
 Output is TAB-delimited with a one-letter line-type column (documented in full in `map-reval cmp --help`). All summary lines share the `Group { reads, diff, unmap }` shape, one column group binned by A's mapQ, one by B's, and (for Q/I) a trailing trio binned by `max(mapQ_A, mapQ_B)`:
 - `Q` — per-read **placement** concordance: reciprocal overlap of the exon-block sets `|A∩B|/|A∪B| ≥ --min-overlap` (default 0.5). `diff` = both-mapped but below threshold; `unmap` = one end unmapped.
 - `I` — per-read **intron-chain** concordance over **spliced reads only** (`a_reads`/`b_reads` require ≥1 junction in A/B; the trio counts reads spliced in either). `diff` = junction chains not identical.
-- `J` — per-**junction** concordance (no trio): `a_reads` = junctions in A at the read's mapQ; `diff` = no exactly-matching junction in a mapped B; `unmap` = B unmapped.
+- `J` — per-**junction** concordance (no trio), 8 data cols in order `a_at a_shifted a_gone a_unmap` (+ B mirror): `a_shifted` = no exact match but overlapping a B junction; `a_gone` = B mapped with no overlapping junction; `a_unmap` = B unmapped (exact matches = `a_at − a_shifted − a_gone − a_unmap`).
 - `U <#reads>` — pairs unmapped in **both** files.
 - `E ...` — one per discordant pair (placement sense), streamed before the summary blocks; `.` for unmapped ends. Emitted only with `-e`.
 

@@ -50,8 +50,8 @@ pub fn run(
     let mut i_b = Group::new();
     let mut i_m = Group::new();
     // J: per-junction concordance.
-    let mut j_a = Group::new();
-    let mut j_b = Group::new();
+    let mut j_a = JGroup::new();
+    let mut j_b = JGroup::new();
 
     let mut skipped_a = 0u64;
     let mut skipped_b = 0u64;
@@ -140,7 +140,9 @@ pub fn run(
             i_m.add(q, !one_unmapped && !chain_ok, one_unmapped);
         }
 
-        // ---- J: per-junction exact match (linear via sorted-list merge) ----
+        // ---- J: per-junction match, split into shifted (overlaps) vs gone ----
+        // `shared` = exact-coordinate matches (symmetric); `overlap_count` per
+        // side counts junctions overlapping any junction in the other alignment.
         let shared = if same_contig {
             shared_count(&pa.junctions, &pb.junctions) as u64
         } else {
@@ -148,20 +150,25 @@ pub fn run(
         };
         let na = pa.junctions.len() as u64;
         if na > 0 {
-            // na > 0 implies A is mapped; a junction is `diff` when B is mapped
-            // but lacks an exact match, `unmap` when B is unmapped.
-            if pb.mapped {
-                j_a.add_n(qa, na, na - shared, 0);
+            // na > 0 implies A is mapped.
+            if !pb.mapped {
+                j_a.add_n(qa, na, 0, 0, na);
+            } else if !same_contig {
+                j_a.add_n(qa, na, na, 0, 0); // mapped elsewhere: none overlap
             } else {
-                j_a.add_n(qa, na, 0, na);
+                let ov = overlap_count(&pa.junctions, &pb.junctions) as u64;
+                j_a.add_n(qa, na, na - ov, ov - shared, 0);
             }
         }
         let nb = pb.junctions.len() as u64;
         if nb > 0 {
-            if pa.mapped {
-                j_b.add_n(qb, nb, nb - shared, 0);
+            if !pa.mapped {
+                j_b.add_n(qb, nb, 0, 0, nb);
+            } else if !same_contig {
+                j_b.add_n(qb, nb, nb, 0, 0);
             } else {
-                j_b.add_n(qb, nb, 0, nb);
+                let ov = overlap_count(&pb.junctions, &pa.junctions) as u64;
+                j_b.add_n(qb, nb, nb - ov, ov - shared, 0);
             }
         }
 
@@ -176,7 +183,7 @@ pub fn run(
 
     write_grouped(&mut out, "Q", &q_a, &q_b, Some(&q_m))?;
     write_grouped(&mut out, "I", &i_a, &i_b, Some(&i_m))?;
-    write_grouped(&mut out, "J", &j_a, &j_b, None)?;
+    write_j(&mut out, &j_a, &j_b)?;
     writeln!(out, "U\t{both_unmapped}").context("failed to write U line")?;
 
     out.flush().context("failed to flush output")?;
@@ -214,10 +221,32 @@ impl Group {
             self.unmap[q] += 1;
         }
     }
+}
 
-    fn add_n(&mut self, q: usize, reads: u64, diff: u64, unmap: u64) {
-        self.reads[q] += reads;
-        self.diff[q] += diff;
+/// Per-mapQ junction tallies. `gone` = other read mapped but no overlapping
+/// junction; `shifted` = overlaps a junction but not an exact match; `unmap` =
+/// other read unmapped. Exact matches = `at - gone - shifted - unmap`.
+struct JGroup {
+    at: [u64; 256],
+    gone: [u64; 256],
+    shifted: [u64; 256],
+    unmap: [u64; 256],
+}
+
+impl JGroup {
+    fn new() -> Self {
+        Self {
+            at: [0; 256],
+            gone: [0; 256],
+            shifted: [0; 256],
+            unmap: [0; 256],
+        }
+    }
+
+    fn add_n(&mut self, q: usize, at: u64, gone: u64, shifted: u64, unmap: u64) {
+        self.at[q] += at;
+        self.gone[q] += gone;
+        self.shifted[q] += shifted;
         self.unmap[q] += unmap;
     }
 }
@@ -247,6 +276,23 @@ fn write_grouped(
                 .context("failed to write summary line")?;
         }
         writeln!(out).context("failed to write summary line")?;
+    }
+    Ok(())
+}
+
+/// Print the J (per-junction) lines: 8 data columns, no max-binned trio.
+fn write_j(out: &mut dyn Write, a: &JGroup, b: &JGroup) -> Result<()> {
+    for q in (0..256).rev() {
+        if a.at[q] == 0 && b.at[q] == 0 {
+            continue;
+        }
+        writeln!(
+            out,
+            "J\t{q}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            a.at[q], a.shifted[q], a.gone[q], a.unmap[q],
+            b.at[q], b.shifted[q], b.gone[q], b.unmap[q],
+        )
+        .context("failed to write J line")?;
     }
     Ok(())
 }
@@ -410,6 +456,23 @@ fn shared_count(a: &[(usize, usize)], b: &[(usize, usize)]) -> usize {
     n
 }
 
+/// Count intervals in `a` that intersect at least one interval in `b` (both
+/// sorted, strictly ascending, disjoint). Each `a` interval is counted once.
+fn overlap_count(a: &[(usize, usize)], b: &[(usize, usize)]) -> usize {
+    let (mut i, mut j, mut n) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i].1 <= b[j].0 {
+            i += 1; // a[i] entirely before b[j]
+        } else if b[j].1 <= a[i].0 {
+            j += 1; // b[j] entirely before a[i]
+        } else {
+            n += 1; // overlap: count a[i] once, advance a
+            i += 1;
+        }
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +594,24 @@ mod tests {
         assert_eq!(shared_count(&[(10, 20)], &[(10, 25)]), 0);
         // empty lists
         assert_eq!(shared_count(&[], &[(10, 20)]), 0);
+    }
+
+    #[test]
+    fn overlap_count_cases() {
+        // disjoint
+        assert_eq!(overlap_count(&[(10, 20)], &[(30, 40)]), 0);
+        // touching is half-open -> no overlap
+        assert_eq!(overlap_count(&[(10, 20)], &[(20, 30)]), 0);
+        // one `a` spanning two `b` counts the single `a` once
+        assert_eq!(overlap_count(&[(10, 100)], &[(20, 30), (40, 50)]), 1);
+        // two disjoint `a` both overlapping one `b` counts both
+        assert_eq!(overlap_count(&[(10, 22), (24, 40)], &[(20, 30)]), 2);
+        // containment
+        assert_eq!(overlap_count(&[(20, 30)], &[(10, 100)]), 1);
+        // exact match is also an overlap
+        assert_eq!(overlap_count(&[(10, 20)], &[(10, 20)]), 1);
+        // empty
+        assert_eq!(overlap_count(&[], &[(10, 20)]), 0);
     }
 
     #[test]

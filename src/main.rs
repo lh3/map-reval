@@ -34,10 +34,11 @@ enum Command {
     ///        per-read intron-chain summary over SPLICED reads only (>=1 N junction);
     ///        "diff" here means the two junction chains are not identical (same-contig
     ///        required). The trailing trio counts reads spliced in either A or B.
-    ///   J  <mapQ> <a_reads> <a_diff> <a_unmap> <b_reads> <b_diff> <b_unmap>
-    ///        per-junction summary: a_reads = junctions in A at this (read) mapQ,
-    ///        a_diff = of those, no exactly-matching junction in a mapped B, a_unmap =
-    ///        of those, B unmapped. B group mirrors it. No max-binned trio.
+    ///   J  <mapQ> <a_at> <a_shifted> <a_gone> <a_unmap> <b_at> <b_shifted> <b_gone> <b_unmap>
+    ///        per-junction summary: a_at = junctions in A at this (read) mapQ;
+    ///        a_shifted = of those, no exact match but overlapping a B junction;
+    ///        a_gone = B mapped with no overlapping junction; a_unmap = B unmapped.
+    ///        Exact matches = a_at - a_shifted - a_gone - a_unmap. B mirrors it. No trio.
     ///   U  <#reads>
     ///        pairs unmapped in both files.
     ///   E  <name> <a_ctg> <a_start> <a_end> <a_strand> <a_mapQ> <b_ctg> <b_start> <b_end> <b_strand> <b_mapQ>
