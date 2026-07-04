@@ -24,15 +24,18 @@ enum Command {
     ///
     /// Output is TAB-delimited; the first column is a one-letter line type:
     ///
-    ///   Q  <mapQ> <#reads> <#wrong> <#unmapped>
-    ///        per-mapQ summary, binned by q = max(mapQ_A, mapQ_B); #wrong counts
-    ///        both-mapped pairs whose reciprocal overlap < --min-overlap; #unmapped
-    ///        counts pairs with exactly one unmapped end.
+    ///   Q  <mapQ> <a_reads> <a_diff> <a_unmap> <b_reads> <b_diff> <b_unmap> <reads> <diff> <unmapped>
+    ///        per-mapQ summary. The A group is binned by A's mapQ: a_reads = reads
+    ///        mapped in A at this mapQ, a_diff = of those, mapped in B but with
+    ///        reciprocal overlap < --min-overlap, a_unmap = of those, unmapped in B.
+    ///        The B group (b_reads/b_diff/b_unmap) is the mirror, binned by B's mapQ.
+    ///        The last three are binned by q = max(mapQ_A, mapQ_B): reads at this
+    ///        mapQ, #diff (both-mapped but discordant), #unmapped (one end unmapped).
     ///   U  <#reads>
     ///        pairs unmapped in both files.
     ///   E  <name> <a_ctg> <a_start> <a_end> <a_strand> <a_mapQ> <b_ctg> <b_start> <b_end> <b_strand> <b_mapQ>
-    ///        one per discordant pair; coordinates are 1-based inclusive, strand is
-    ///        +/-, and an unmapped end has "." in all five of its fields.
+    ///        one per discordant pair (only with -e); coordinates are 1-based
+    ///        inclusive, strand is +/-, an unmapped end has "." in all five fields.
     #[command(verbatim_doc_comment)]
     Cmp(CmpArgs),
 }
@@ -56,9 +59,9 @@ struct CmpArgs {
     /// Write output to this file instead of stdout.
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// Suppress per-read E lines (emit Q summary only).
-    #[arg(long = "no-e")]
-    no_e: bool,
+    /// Emit per-read E lines for discordant reads (off by default).
+    #[arg(short = 'e', long = "emit-e")]
+    emit_e: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -70,7 +73,7 @@ fn main() -> anyhow::Result<()> {
             &args.b,
             args.min_overlap,
             args.output.as_deref(),
-            !args.no_e,
+            args.emit_e,
         ),
     }
 }

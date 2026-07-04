@@ -37,10 +37,19 @@ pub fn run(
         None => Box::new(BufWriter::new(io::stdout().lock())),
     };
 
-    // Per-mapQ tallies indexed by q = max(mapqA, mapqB).
+    // Legacy tallies indexed by q = max(mapqA, mapqB).
     let mut n_reads = [0u64; 256];
     let mut n_wrong = [0u64; 256];
     let mut n_unmapped = [0u64; 256];
+
+    // A-group indexed by mapQ_A (reads mapped in A); how they fare in B.
+    let mut a_reads = [0u64; 256];
+    let mut a_diff = [0u64; 256];
+    let mut a_unmap = [0u64; 256];
+    // B-group indexed by mapQ_B (reads mapped in B); how they fare in A.
+    let mut b_reads = [0u64; 256];
+    let mut b_diff = [0u64; 256];
+    let mut b_unmap = [0u64; 256];
 
     let mut skipped_a = 0u64;
     let mut skipped_b = 0u64;
@@ -81,23 +90,39 @@ pub fn run(
         let pb = Placement::of(&rec_b, &names_b);
         spliced += u64::from(pa.spliced) + u64::from(pb.spliced);
 
-        let q = pa.mapq.max(pb.mapq) as usize;
+        let qa = pa.mapq as usize;
+        let qb = pb.mapq as usize;
+        let q = qa.max(qb);
 
         let discordant = if pa.mapped && pb.mapped {
-            n_reads[q] += 1;
             let ratio = if pa.contig == pb.contig {
                 reciprocal_overlap(pa.start, pa.end, pb.start, pb.end)
             } else {
                 0.0
             };
             let wrong = ratio < min_overlap;
+            n_reads[q] += 1;
+            a_reads[qa] += 1;
+            b_reads[qb] += 1;
             if wrong {
                 n_wrong[q] += 1;
+                a_diff[qa] += 1;
+                b_diff[qb] += 1;
             }
             wrong
-        } else if pa.mapped || pb.mapped {
+        } else if pa.mapped {
+            // A mapped, B unmapped.
             n_reads[q] += 1;
             n_unmapped[q] += 1;
+            a_reads[qa] += 1;
+            a_unmap[qa] += 1;
+            true
+        } else if pb.mapped {
+            // B mapped, A unmapped.
+            n_reads[q] += 1;
+            n_unmapped[q] += 1;
+            b_reads[qb] += 1;
+            b_unmap[qb] += 1;
             true
         } else {
             // Both unmapped: no placement to report; tallied on the U line.
@@ -115,9 +140,15 @@ pub fn run(
     }
 
     for q in (0..256).rev() {
-        if n_reads[q] > 0 {
-            writeln!(out, "Q\t{q}\t{}\t{}\t{}", n_reads[q], n_wrong[q], n_unmapped[q])
-                .context("failed to write Q line")?;
+        if a_reads[q] > 0 || b_reads[q] > 0 || n_reads[q] > 0 {
+            writeln!(
+                out,
+                "Q\t{q}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                a_reads[q], a_diff[q], a_unmap[q],
+                b_reads[q], b_diff[q], b_unmap[q],
+                n_reads[q], n_wrong[q], n_unmapped[q],
+            )
+            .context("failed to write Q line")?;
         }
     }
     writeln!(out, "U\t{both_unmapped}").context("failed to write U line")?;

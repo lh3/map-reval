@@ -21,7 +21,7 @@ cargo fmt
 ## Subcommands
 
 - `map-reval flip [-o OUT] [INPUT]` — reads an alignment made against the RC reference and flips every record back onto the original strand, emitting BAM. `INPUT`/`OUT` default to stdin/stdout (`-` is also accepted).
-- `map-reval cmp [-l MIN_OVERLAP] [-o OUT] [--no-e] <A> <B>` — compares two BAMs of the same reads (typically a forward-ref BAM vs a `flip`ped RC-ref BAM) and reports per-mapQ concordance. `-l` sets the reciprocal-overlap threshold (default 0.5); `--no-e` suppresses per-read lines.
+- `map-reval cmp [-l MIN_OVERLAP] [-o OUT] [-e] <A> <B>` — compares two BAMs of the same reads (typically a forward-ref BAM vs a `flip`ped RC-ref BAM) and reports per-mapQ concordance. `-l` sets the reciprocal-overlap threshold (default 0.5); `-e` additionally emits per-read `E` lines (off by default).
 
 ## Architecture
 
@@ -49,11 +49,11 @@ Tag policy: `flip` transforms `MD`/`MC`/`SA` and treats a fixed allowlist (`KNOW
 `cmp` assumes A and B contain the **same reads in the same order** (both must emit unmapped records). It iterates **primary alignments only** in lock-step (skipping `0x100`/`0x800`), pairing the k-th primary of each; a read-name/segment mismatch or a primary-count mismatch is a **fatal error** (no resync). Concordance is **reciprocal overlap** of the two reference footprints (`[pos, pos+span)`, same-contig required): `|A∩B| / |A∪B| ≥ --min-overlap` (default 0.5). Splicing (`N`) is folded into the span for now (approximate; warns once). Each read is binned by `q = max(mapQ_A, mapQ_B)`.
 
 Output is TAB-delimited with a one-letter line-type column (documented in full in `map-reval cmp --help`):
-- `Q <mapQ> <#reads> <#wrong> <#unmapped>` — per-mapQ summary; `#wrong` = both-mapped but overlap < threshold; `#unmapped` = exactly one end unmapped.
+- `Q <mapQ> <a_reads> <a_diff> <a_unmap> <b_reads> <b_diff> <b_unmap> <reads> <diff> <unmapped>` — per-mapQ summary. The A group (binned by A's mapQ) is `a_reads` mapped in A at this mapQ, `a_diff` of those discordant in B, `a_unmap` of those unmapped in B; the B group mirrors it binned by B's mapQ. The trailing `reads`/`diff`/`unmapped` are binned by `max(mapQ_A, mapQ_B)` (`diff` = both-mapped but overlap < threshold; `unmapped` = exactly one end unmapped).
 - `U <#reads>` — pairs unmapped in **both** files.
-- `E <name> <a_ctg a_start a_end a_strand a_mapQ> <b_...>` — one per discordant pair (streamed before the `Q`/`U` block); unmapped ends use `.` for all five fields. Suppressed by `--no-e`.
+- `E <name> <a_ctg a_start a_end a_strand a_mapQ> <b_...>` — one per discordant pair (streamed before the `Q`/`U` block); unmapped ends use `.` for all five fields. Emitted only with `-e`.
 
-Invariant worth checking after changes: `Σ Q.#reads + U == ` total primary pairs, and `#E lines == Σ (Q.#wrong + Q.#unmapped)`.
+Invariant worth checking after changes: `Σ Q.reads + U == ` total primary pairs, and `#E lines == Σ (Q.diff + Q.unmapped)`.
 
 ## Testing / verification
 
