@@ -62,4 +62,3 @@ full column spec):
 Both inputs must list the **same reads in the same order** (name-collated, with
 unmapped reads emitted, e.g. `samtools collate`). `cmp` compares primary
 alignments only.
-```
