@@ -86,22 +86,23 @@ pub fn run(
                      inputs must contain the same reads in the same order"
                 ),
                 (Some(sa), Some(sb)) => {
-                    let (a_wrong, b_wrong) = cx.compare(sa, sb, min_overlap);
+                    let discordant = cx.compare(sa, sb, min_overlap);
 
                     let has_junctions =
                         !sa.primary.junctions.is_empty() || !sb.primary.junctions.is_empty();
                     if emit_e
                         && sa.primary.mapq.max(sb.primary.mapq) >= min_mapq
-                        && (a_wrong || b_wrong || has_junctions)
+                        && (discordant || has_junctions)
                     {
                         let name = format!("{}{}", group_name_str(&group_a), seg_suffix(key));
-                        for (tag, wrong, p) in
-                            [("A", a_wrong, &sa.primary), ("B", b_wrong, &sb.primary)]
-                        {
-                            if wrong {
-                                writeln!(out, "{tag}\t{name}\t{}", p.fields())
-                                    .with_context(|| format!("failed to write {tag} line"))?;
-                            }
+                        if discordant {
+                            writeln!(
+                                out,
+                                "E\t{name}\t{}\t{}",
+                                sa.primary.fields(),
+                                sb.primary.fields()
+                            )
+                            .context("failed to write E line")?;
                         }
                         let same_contig = sa.primary.mapped
                             && sb.primary.mapped
@@ -276,7 +277,7 @@ type Intervals = Vec<(usize, usize)>;
 struct Placement<'a> {
     mapped: bool,
     contig: Option<&'a str>,
-    start: usize, // outer extent, for the A/B-line display only
+    start: usize, // outer extent, for the E-line display only
     end: usize,
     rev: bool,
     mapq: u8,
@@ -321,7 +322,7 @@ impl<'a> Placement<'a> {
         }
     }
 
-    /// The five TAB-separated A/B-line fields for this side (`.` when unmapped):
+    /// The five TAB-separated E-line fields for this side (`.` when unmapped):
     /// the outer extent as a 0-based half-open (BED) interval.
     fn fields(&self) -> String {
         if !self.mapped {
@@ -408,10 +409,10 @@ impl Counters {
     }
 
     /// Compare one read (a single segment) and update all tallies; returns
-    /// `(a_wrong, b_wrong)` — whether each file's primary is placement-discordant
-    /// (drives A/B line emission). `sa`/`sb` carry the primary placement plus every
-    /// mapped alignment (primary + supplementary).
-    fn compare(&mut self, sa: &Seg, sb: &Seg, min_overlap: f64) -> (bool, bool) {
+    /// whether the pair is placement-discordant (drives E emission). `sa`/`sb`
+    /// carry the primary placement plus every mapped alignment (primary +
+    /// supplementary).
+    fn compare(&mut self, sa: &Seg, sb: &Seg, min_overlap: f64) -> bool {
         let pa = &sa.primary;
         let pb = &sb.primary;
         let qa = pa.mapq as usize;
@@ -419,7 +420,7 @@ impl Counters {
         let same_contig = pa.mapped && pb.mapped && pa.contig == pb.contig;
 
         // ---- Q: primary concordant if it overlaps ANY alignment on the other side ----
-        let (a_wrong, b_wrong) = if pa.mapped && pb.mapped {
+        let discordant = if pa.mapped && pb.mapped {
             let a_conc = sb.alns.iter().any(|o| {
                 pa.contig == o.contig && reciprocal_overlap(&pa.blocks, &o.blocks) >= min_overlap
             });
@@ -428,16 +429,16 @@ impl Counters {
             });
             self.q_a.add(qa, !a_conc, false);
             self.q_b.add(qb, !b_conc, false);
-            (!a_conc, !b_conc)
+            !a_conc || !b_conc
         } else if pa.mapped {
             self.q_a.add(qa, false, true);
-            (true, false)
+            true
         } else if pb.mapped {
             self.q_b.add(qb, false, true);
-            (false, true)
+            true
         } else {
             self.both_unmapped += 1;
-            (false, false)
+            false
         };
 
         // ---- I: primary chain concordant if it matches ANY alignment's chain ----
@@ -491,7 +492,7 @@ impl Counters {
             }
         }
 
-        (a_wrong, b_wrong)
+        discordant
     }
 }
 

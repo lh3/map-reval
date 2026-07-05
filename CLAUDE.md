@@ -55,10 +55,10 @@ Output is TAB-delimited with a one-letter line-type column (documented in full i
 - `I` — per-read **intron-chain** concordance over **spliced reads only** (`a_reads`/`b_reads` require ≥1 junction in the primary). `a_diff` = A primary's junction chain equals **no** B alignment's chain.
 - `J` — per-**junction** concordance, 8 data cols in order `a_at a_shifted a_gone a_unmap` (+ B mirror): `a_shifted` = no exact match but overlapping a B junction; `a_gone` = B mapped with no overlapping junction; `a_unmap` = B unmapped (exact matches = `a_at − a_shifted − a_gone − a_unmap`).
 - `U <#reads>` — pairs unmapped in **both** files.
-- `A ...` / `B ...` — one-sided discordance detail (only with `-e`): an `A` line is the discordant A-primary interval (`ctg start end strand mapQ`, BED), emitted when that read's A primary is placement-discordant; `B` is the mirror. A read discordant both ways emits both. Name carries a `/1`/`/2` suffix.
-- `F ...` — 12 columns per **junction** (only with `-e`): one line per non-exact junction on both sides; the focus junction fills its own side (BED interval), the other side shows the largest-overlapping junction (shifted) or `.`×5 (gone / other read unmapped). Identical F lines are deduplicated, so a shifted junction (whose A- and B-focused lines coincide) is shown once.
+- `E ...` — one per placement-discordant read (only with `-e`): both primaries' intervals (`a_ctg a_start a_end a_strand a_mapQ` + B mirror), streamed before the summary blocks; read name carries a `/1`/`/2` suffix; intervals are **0-based half-open (BED)**, `.` for an unmapped end.
+- `F ...` — same 12 columns as `E` but per **junction** (only with `-e`): one line per non-exact junction on both sides; the focus junction fills its own side (BED interval), the other side shows the largest-overlapping junction (shifted) or `.`×5 (gone / other read unmapped). Identical F lines are deduplicated, so a shifted junction (whose A- and B-focused lines coincide) is shown once.
 
-`A`/`B`/`F` lines are suppressed when `max(a_mapQ, b_mapQ) < -q` (default 5). Invariants worth checking: `#A lines (at -q 0) == Σ (Q.a_diff + Q.a_unmap)`, mirror for `B`; `Σ J.a_reads == ` total `N` junctions in A. (`Q.a_diff`/`Q.b_diff` are directional and need not be equal, since a supplementary can rescue one side but not the other.)
+`E`/`F` lines are suppressed when `max(a_mapQ, b_mapQ) < -q` (default 5). Invariants worth checking: `Σ J.a_reads == ` total `N` junctions in A. (`Q.a_diff`/`Q.b_diff` are directional and need not be equal, since a supplementary can rescue one side but not the other.)
 
 ## Testing / verification
 

@@ -42,18 +42,16 @@ enum Command {
     ///        Exact matches = a_at - a_shifted - a_gone - a_unmap. B mirrors it. No trio.
     ///   U  <#reads>
     ///        pairs unmapped in both files.
-    ///   A  <name> <ctg> <start> <end> <strand> <mapQ>   (only with -e)
-    ///        the A-primary interval of a read whose A primary is placement-discordant
-    ///        (no >= --min-overlap match among B's alignments, or unmapped in B).
-    ///   B  <name> <ctg> <start> <end> <strand> <mapQ>   (only with -e)
-    ///        same, for the B-primary interval. name carries a /1 or /2 suffix;
-    ///        intervals are 0-based half-open (BED), strand +/-.
-    ///   F  <name> <a...> <b...>   (12 columns; only with -e)
+    ///   E  <name> <a_ctg> <a_start> <a_end> <a_strand> <a_mapQ> <b_ctg> <b_start> <b_end> <b_strand> <b_mapQ>
+    ///        one per placement-discordant read (only with -e); name carries a /1 or
+    ///        /2 segment suffix; intervals are 0-based half-open (BED), strand is
+    ///        +/-, an unmapped end has "." in all five.
+    ///   F  <name> <a...> <b...>   (same 12 columns as E; only with -e)
     ///        one per non-exact junction (both sides). The focus junction fills its
     ///        own side (BED interval); the other side shows the largest-overlapping
     ///        junction if shifted, else "." x5 (gone or the other read unmapped).
     ///        A shifted junction is emitted once (identical A/B-focused lines dedup).
-    ///        A/B/F lines are suppressed when max(a_mapQ, b_mapQ) < -q (default 5).
+    ///        E and F lines are suppressed when max(a_mapQ, b_mapQ) < -q (default 5).
     #[command(verbatim_doc_comment)]
     Cmp(CmpArgs),
 }
