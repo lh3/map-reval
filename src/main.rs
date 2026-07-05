@@ -24,17 +24,17 @@ enum Command {
     ///
     /// Output is TAB-delimited; the first column is a one-letter line type:
     ///
-    ///   Q  <mapQ> <a_reads> <a_diff> <a_unmap> <b_reads> <b_diff> <b_unmap> <reads> <diff> <unmapped>
+    ///   Q  <mapQ> <a_reads> <a_diff> <a_unmap> <b_reads> <b_diff> <b_unmap>
     ///        per-read placement summary. The A group is binned by A's mapQ:
     ///        a_reads = reads mapped in A at this mapQ, a_diff = of those, whose
     ///        A primary reaches reciprocal overlap >= --min-overlap with NO alignment
     ///        (primary or supplementary) of that read in B, a_unmap = of those,
-    ///        unmapped in B. The B group is the mirror, binned by B's mapQ. The last
-    ///        three are binned by q = max(mapQ_A, mapQ_B). (Secondary alns ignored.)
-    ///   I  <mapQ> ... (same 9 columns as Q)
+    ///        unmapped in B. The B group is the mirror, binned by B's mapQ.
+    ///        (Secondary alignments are ignored.)
+    ///   I  <mapQ> ... (same 6 columns as Q)
     ///        per-read intron-chain summary over SPLICED reads only (>=1 N junction);
-    ///        "diff" here means the two junction chains are not identical (same-contig
-    ///        required). The trailing trio counts reads spliced in either A or B.
+    ///        "diff" means the A primary's junction chain matches no B alignment's
+    ///        chain (same-contig required).
     ///   J  <mapQ> <a_at> <a_shifted> <a_gone> <a_unmap> <b_at> <b_shifted> <b_gone> <b_unmap>
     ///        per-junction summary: a_at = junctions in A at this (read) mapQ;
     ///        a_shifted = of those, no exact match but overlapping a B junction;
@@ -42,16 +42,18 @@ enum Command {
     ///        Exact matches = a_at - a_shifted - a_gone - a_unmap. B mirrors it. No trio.
     ///   U  <#reads>
     ///        pairs unmapped in both files.
-    ///   E  <name> <a_ctg> <a_start> <a_end> <a_strand> <a_mapQ> <b_ctg> <b_start> <b_end> <b_strand> <b_mapQ>
-    ///        one per discordant pair (only with -e); name carries a /1 or /2
-    ///        segment suffix; intervals are 0-based half-open (BED), strand is
-    ///        +/-, an unmapped end has "." in all five.
-    ///   F  <name> <a...> <b...>   (same 12 columns as E; only with -e)
+    ///   A  <name> <ctg> <start> <end> <strand> <mapQ>   (only with -e)
+    ///        the A-primary interval of a read whose A primary is placement-discordant
+    ///        (no >= --min-overlap match among B's alignments, or unmapped in B).
+    ///   B  <name> <ctg> <start> <end> <strand> <mapQ>   (only with -e)
+    ///        same, for the B-primary interval. name carries a /1 or /2 suffix;
+    ///        intervals are 0-based half-open (BED), strand +/-.
+    ///   F  <name> <a...> <b...>   (12 columns; only with -e)
     ///        one per non-exact junction (both sides). The focus junction fills its
     ///        own side (BED interval); the other side shows the largest-overlapping
     ///        junction if shifted, else "." x5 (gone or the other read unmapped).
     ///        A shifted junction is emitted once (identical A/B-focused lines dedup).
-    ///        E and F lines are suppressed when max(a_mapQ, b_mapQ) < -q (default 5).
+    ///        A/B/F lines are suppressed when max(a_mapQ, b_mapQ) < -q (default 5).
     #[command(verbatim_doc_comment)]
     Cmp(CmpArgs),
 }

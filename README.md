@@ -55,7 +55,8 @@ full column spec):
 - `I` — intron-chain concordance for spliced reads
 - `J` — per-junction concordance (exact / shifted / gone / unmapped)
 - `U` — reads unmapped in both
-- `E` / `F` — per-read / per-junction discordance detail (with `-e`)
+- `A` / `B` — a discordant primary interval in the A / B file (with `-e`)
+- `F` — per-junction discordance detail (with `-e`)
 
 ## Requirements
 

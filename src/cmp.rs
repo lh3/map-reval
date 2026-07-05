@@ -86,26 +86,27 @@ pub fn run(
                      inputs must contain the same reads in the same order"
                 ),
                 (Some(sa), Some(sb)) => {
-                    let discordant = cx.compare(sa, sb, min_overlap);
+                    let (a_wrong, b_wrong) = cx.compare(sa, sb, min_overlap);
 
-                    if emit_e {
-                        let q = sa.primary.mapq.max(sb.primary.mapq);
-                        if q >= min_mapq {
-                            let name = format!("{}{}", group_name_str(&group_a), seg_suffix(key));
-                            if discordant {
-                                writeln!(
-                                    out,
-                                    "E\t{name}\t{}\t{}",
-                                    sa.primary.fields(),
-                                    sb.primary.fields()
-                                )
-                                .context("failed to write E line")?;
+                    let has_junctions =
+                        !sa.primary.junctions.is_empty() || !sb.primary.junctions.is_empty();
+                    if emit_e
+                        && sa.primary.mapq.max(sb.primary.mapq) >= min_mapq
+                        && (a_wrong || b_wrong || has_junctions)
+                    {
+                        let name = format!("{}{}", group_name_str(&group_a), seg_suffix(key));
+                        for (tag, wrong, p) in
+                            [("A", a_wrong, &sa.primary), ("B", b_wrong, &sb.primary)]
+                        {
+                            if wrong {
+                                writeln!(out, "{tag}\t{name}\t{}", p.fields())
+                                    .with_context(|| format!("failed to write {tag} line"))?;
                             }
-                            let same_contig = sa.primary.mapped
-                                && sb.primary.mapped
-                                && sa.primary.contig == sb.primary.contig;
-                            write_f_lines(&mut out, &name, &sa.primary, &sb.primary, same_contig)?;
                         }
+                        let same_contig = sa.primary.mapped
+                            && sb.primary.mapped
+                            && sa.primary.contig == sb.primary.contig;
+                        write_f_lines(&mut out, &name, &sa.primary, &sb.primary, same_contig)?;
                     }
                     idx += 1;
                 }
@@ -113,8 +114,8 @@ pub fn run(
         }
     }
 
-    write_grouped(&mut out, "Q", &cx.q_a, &cx.q_b, Some(&cx.q_m))?;
-    write_grouped(&mut out, "I", &cx.i_a, &cx.i_b, Some(&cx.i_m))?;
+    write_grouped(&mut out, "Q", &cx.q_a, &cx.q_b)?;
+    write_grouped(&mut out, "I", &cx.i_a, &cx.i_b)?;
     write_j(&mut out, &cx.j_a, &cx.j_b)?;
     writeln!(out, "U\t{}", cx.both_unmapped).context("failed to write U line")?;
 
@@ -184,31 +185,19 @@ impl JGroup {
     }
 }
 
-/// Print grouped per-mapQ rows (high→low) for a line type. `m` is the
-/// max(mapQ)-binned trio, appended when present (Q, I) and omitted for J.
-fn write_grouped(
-    out: &mut dyn Write,
-    tag: &str,
-    a: &Group,
-    b: &Group,
-    m: Option<&Group>,
-) -> Result<()> {
+/// Print grouped per-mapQ rows (high→low) for a line type: an A-side and a
+/// B-side triple, binned by each file's own mapQ.
+fn write_grouped(out: &mut dyn Write, tag: &str, a: &Group, b: &Group) -> Result<()> {
     for q in (0..256).rev() {
-        let show = a.reads[q] > 0 || b.reads[q] > 0 || m.is_some_and(|m| m.reads[q] > 0);
-        if !show {
+        if a.reads[q] == 0 && b.reads[q] == 0 {
             continue;
         }
-        write!(
+        writeln!(
             out,
             "{tag}\t{q}\t{}\t{}\t{}\t{}\t{}\t{}",
             a.reads[q], a.diff[q], a.unmap[q], b.reads[q], b.diff[q], b.unmap[q],
         )
         .context("failed to write summary line")?;
-        if let Some(m) = m {
-            write!(out, "\t{}\t{}\t{}", m.reads[q], m.diff[q], m.unmap[q])
-                .context("failed to write summary line")?;
-        }
-        writeln!(out).context("failed to write summary line")?;
     }
     Ok(())
 }
@@ -287,7 +276,7 @@ type Intervals = Vec<(usize, usize)>;
 struct Placement<'a> {
     mapped: bool,
     contig: Option<&'a str>,
-    start: usize, // outer extent, for the E-line display only
+    start: usize, // outer extent, for the A/B-line display only
     end: usize,
     rev: bool,
     mapq: u8,
@@ -332,7 +321,7 @@ impl<'a> Placement<'a> {
         }
     }
 
-    /// The five TAB-separated E-line fields for this side (`.` when unmapped):
+    /// The five TAB-separated A/B-line fields for this side (`.` when unmapped):
     /// the outer extent as a 0-based half-open (BED) interval.
     fn fields(&self) -> String {
         if !self.mapped {
@@ -394,10 +383,8 @@ fn contig_names(header: &sam::Header) -> Vec<String> {
 struct Counters {
     q_a: Group,
     q_b: Group,
-    q_m: Group,
     i_a: Group,
     i_b: Group,
-    i_m: Group,
     j_a: JGroup,
     j_b: JGroup,
     spliced_a: u64,
@@ -410,10 +397,8 @@ impl Counters {
         Self {
             q_a: Group::new(),
             q_b: Group::new(),
-            q_m: Group::new(),
             i_a: Group::new(),
             i_b: Group::new(),
-            i_m: Group::new(),
             j_a: JGroup::new(),
             j_b: JGroup::new(),
             spliced_a: 0,
@@ -422,19 +407,19 @@ impl Counters {
         }
     }
 
-    /// Compare one read (a single segment) and update all tallies; returns whether
-    /// the pair is placement-discordant (drives E emission). `sa`/`sb` carry the
-    /// primary placement plus every mapped alignment (primary + supplementary).
-    fn compare(&mut self, sa: &Seg, sb: &Seg, min_overlap: f64) -> bool {
+    /// Compare one read (a single segment) and update all tallies; returns
+    /// `(a_wrong, b_wrong)` — whether each file's primary is placement-discordant
+    /// (drives A/B line emission). `sa`/`sb` carry the primary placement plus every
+    /// mapped alignment (primary + supplementary).
+    fn compare(&mut self, sa: &Seg, sb: &Seg, min_overlap: f64) -> (bool, bool) {
         let pa = &sa.primary;
         let pb = &sb.primary;
         let qa = pa.mapq as usize;
         let qb = pb.mapq as usize;
-        let q = qa.max(qb);
         let same_contig = pa.mapped && pb.mapped && pa.contig == pb.contig;
 
         // ---- Q: primary concordant if it overlaps ANY alignment on the other side ----
-        let discordant = if pa.mapped && pb.mapped {
+        let (a_wrong, b_wrong) = if pa.mapped && pb.mapped {
             let a_conc = sb.alns.iter().any(|o| {
                 pa.contig == o.contig && reciprocal_overlap(&pa.blocks, &o.blocks) >= min_overlap
             });
@@ -443,19 +428,16 @@ impl Counters {
             });
             self.q_a.add(qa, !a_conc, false);
             self.q_b.add(qb, !b_conc, false);
-            self.q_m.add(q, !a_conc || !b_conc, false);
-            !a_conc || !b_conc
+            (!a_conc, !b_conc)
         } else if pa.mapped {
-            self.q_m.add(q, false, true);
             self.q_a.add(qa, false, true);
-            true
+            (true, false)
         } else if pb.mapped {
-            self.q_m.add(q, false, true);
             self.q_b.add(qb, false, true);
-            true
+            (false, true)
         } else {
             self.both_unmapped += 1;
-            false
+            (false, false)
         };
 
         // ---- I: primary chain concordant if it matches ANY alignment's chain ----
@@ -478,10 +460,6 @@ impl Counters {
             if b_spliced {
                 self.i_b.add(qb, pa.mapped && !b_chain_conc, !pa.mapped);
             }
-            let one_unmapped = !pa.mapped || !pb.mapped;
-            let m_diff = !one_unmapped
-                && ((a_spliced && !a_chain_conc) || (b_spliced && !b_chain_conc));
-            self.i_m.add(q, m_diff, one_unmapped);
         }
 
         // ---- J: per-junction match (primary-vs-primary, unchanged) ----
@@ -513,7 +491,7 @@ impl Counters {
             }
         }
 
-        discordant
+        (a_wrong, b_wrong)
     }
 }
 
